@@ -136,6 +136,13 @@ void setup() {
             module->init();
         }
 
+#if defined(ESP32) && __has_include(<esp_now.h>)
+        // ESP-NOW requires WiFi to be running, so init after the Module loop above.
+        if (config->_espnow_server) {
+            config->_espnow_server->init();
+        }
+#endif
+
         auto atcs = ATCs::ATCFactory::objects();
         for (auto const& atc : atcs) {
             atc->init();

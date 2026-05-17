@@ -44,6 +44,9 @@ namespace Machine {
 
         handler.sections("uart", 1, MAX_N_UARTS, true, _uarts);
         handler.sections("uart_channel", 1, MAX_N_UARTS, true, _uart_channels);
+#if defined(ESP32) && __has_include(<esp_now.h>)
+        handler.section("espnow_channel", _espnow_server);  // key kept for YAML backward compat
+#endif
 #if MAX_N_I2SO
         // We currently support only one I2S bus
         handler.section("i2so", _i2so);

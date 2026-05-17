@@ -20,6 +20,11 @@
 #include "Stepping.h"
 #include "Stepper.h"
 #include "UartChannel.h"
+#ifdef ARDUINO
+#if defined(ESP32) && __has_include(<esp_now.h>)
+#    include "ESPNowServer.h"
+#endif
+#endif
 #include "Driver/Console.h"
 #include "Module.h"
 #include "Listeners/SysListener.h"
@@ -89,6 +94,9 @@ namespace Machine {
 
         UartChannel* _uart_channels[MAX_N_UARTS] = { nullptr };
         Uart*        _uarts[MAX_N_UARTS]         = { nullptr };
+#if defined(ESP32) && __has_include(<esp_now.h>)
+        ESPNowServer* _espnow_server = nullptr;
+#endif
 
         float _arcTolerance      = 0.002f;
         float _junctionDeviation = 0.01f;

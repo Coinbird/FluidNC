@@ -1,0 +1,248 @@
+// Copyright (c) 2024 FluidNC contributors
+// Use of this source code is governed by a GPLv3 license that can be found in the LICENSE file.
+
+#include "ESPNowServer.h"
+#include "ESPNowClient.h"
+#include "../src/Channel.h"
+#include "../src/Serial.h"   // allChannels
+#include "../src/Report.h"   // log_info, log_error, log_warn
+
+#include <esp_now.h>
+#include <cstring>
+#include <cstdio>
+#include <cstdlib>  // atoi
+
+static const uint8_t kBroadcastMac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+
+// ── ESPNowBroadcastChannel ────────────────────────────────────────────────────
+// Registered with allChannels so FluidNC's report system sends status strings
+// here.  Only lines that start with '<' (status reports) are forwarded;
+// everything else is discarded.  Accepted lines are wrapped as
+// "[FluidNC: <Idle|Run|...>]" and sent as a broadcast ESP-NOW frame.
+
+class ESPNowBroadcastChannel : public Channel {
+    static constexpr size_t kLineBuf = 256;
+
+    char   _buf[kLineBuf];
+    size_t _len = 0;
+
+    static void doBroadcast(const char* msg) {
+        char   frame[300];
+        size_t flen = snprintf(frame, sizeof(frame), "[FluidNC: %s]", msg);
+        esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t*>(frame), flen);
+    }
+
+public:
+    ESPNowBroadcastChannel() : Channel("espnow_broadcast") {}
+
+    size_t write(uint8_t c) override {
+        if (_len < kLineBuf - 1) {
+            _buf[_len++] = c;
+        }
+        if (c == '\n' || _len >= kLineBuf - 1) {
+            // Trim trailing CR/LF.
+            while (_len > 0 && (_buf[_len - 1] == '\n' || _buf[_len - 1] == '\r')) {
+                --_len;
+            }
+            _buf[_len] = '\0';
+            if (_len > 0 && _buf[0] == '<') {
+                doBroadcast(_buf);
+            }
+            _len = 0;
+        }
+        return 1;
+    }
+
+    size_t write(const uint8_t* buf, size_t len) override {
+        for (size_t i = 0; i < len; i++) {
+            write(buf[i]);
+        }
+        return len;
+    }
+
+    // Broadcast channel is write-only — no inbound data.
+    int  available() override { return 0; }
+    int  read() override { return -1; }
+    int  peek() override { return -1; }
+    void flushRx() override {}
+    int  rx_buffer_available() override { return 0; }
+    bool realtimeOkay(char /*c*/) override { return false; }
+    bool lineComplete(char* /*line*/, char /*c*/) override { return false; }
+};
+
+// ── ESPNowServer ──────────────────────────────────────────────────────────────
+
+ESPNowServer* ESPNowServer::_instance = nullptr;
+
+// ── Static callbacks (WiFi task context) ──────────────────────────────────────
+
+void ESPNowServer::onReceive(const uint8_t* mac, const uint8_t* data, int len) {
+    if (!_instance || len <= 0) {
+        return;
+    }
+
+    // Detect "[FluidNC: cmd]" control frames.
+    static const char kPrefix[]  = "[FluidNC: ";
+    static const int  kPrefixLen = sizeof(kPrefix) - 1;
+
+    if (len > kPrefixLen && data[0] == '[' && data[len - 1] == ']' &&
+        memcmp(data, kPrefix, kPrefixLen) == 0) {
+        int  cmdLen = len - kPrefixLen - 1;  // strip prefix and trailing ']'
+        char cmd[128] = {};
+        if (cmdLen > 0 && cmdLen < (int)sizeof(cmd)) {
+            memcpy(cmd, data + kPrefixLen, cmdLen);
+            cmd[cmdLen] = '\0';
+            _instance->handleFrame(mac, cmd);
+        }
+        return;
+    }
+
+    // Raw bytes — GCode from a connected remote.  Route to the matching
+    // unicast client.  Special-case: reply to a bare '?' from an unconnected
+    // device so it can be used as a channel-alive probe without having to
+    // speak the [FluidNC: ...] protocol first.
+    ESPNowClient* client = _instance->findClient(mac);
+    if (client) {
+        client->pushBytes(data, len);
+    } else if (len == 1 && data[0] == '?') {
+        // Minimal "I'm here" broadcast reply so FluidDial can use '?' as a
+        // channel-alive probe before sending [FluidNC: Connect].
+        sendFrame(kBroadcastMac, "?");
+    }
+}
+
+void ESPNowServer::onSend(const uint8_t* mac, esp_now_send_status_t /*status*/) {
+    if (!_instance) {
+        return;
+    }
+    // Broadcast sends don't count against any client's inflight budget.
+    if (memcmp(mac, kBroadcastMac, 6) == 0) {
+        return;
+    }
+    // Notify the matching client that a TX slot freed up.
+    ESPNowClient* client = _instance->findClient(mac);
+    if (client) {
+        client->onSendComplete();
+    }
+}
+
+// ── Frame handling ────────────────────────────────────────────────────────────
+
+void ESPNowServer::handleFrame(const uint8_t* mac, const char* cmd) {
+    // ── Control mode ──────────────────────────────────────────────────────────
+    if (strcmp(cmd, "Connect") == 0) {
+        ESPNowClient* existing = findClient(mac);
+        if (existing) {
+            // Reuse the existing client object — NEVER delete a Channel from
+            // this WiFi-task callback; that races the main task's channel
+            // poll and corrupts the heap. reactivate() resets the idle-timeout
+            // state in place. The pendant keeps its original ID.
+            existing->reactivate();
+            char reply[32];
+            snprintf(reply, sizeof(reply), "Connected id=%d", existing->id());
+            sendFrame(mac, reply);
+            log_info("espnow: remote (id=" << existing->id() << ") reconnected");
+            return;
+        }
+        ESPNowClient* client = createClient(mac);
+        if (client) {
+            char reply[32];
+            snprintf(reply, sizeof(reply), "Connected id=%d", client->id());
+            sendFrame(mac, reply);
+            log_info("espnow: remote (id=" << client->id() << ") connected");
+        } else {
+            sendFrame(mac, "Busy");
+            log_warn("espnow: rejected remote (slots full)");
+        }
+        return;
+    }
+
+    if (strcmp(cmd, "Disconnect") == 0) {
+        // Mark stale rather than delete — removeClient() from this WiFi-task
+        // callback would race the main task's channel poll. The client object
+        // is reused in place if the same pendant reconnects.
+        ESPNowClient* client = findClient(mac);
+        if (client && !client->isStale()) {
+            client->markStale();
+            log_info("espnow: remote (id=" << client->id() << ") disconnected");
+        }
+        return;
+    }
+
+    // ── Display mode ──────────────────────────────────────────────────────────
+    // "[FluidNC: $report/interval=N]" — fire-and-forget from any display device.
+    if (strncmp(cmd, "$report/interval=", 17) == 0) {
+        int32_t ms = static_cast<int32_t>(atoi(cmd + 17));
+        if (ms > 0 && _broadcastChannel) {
+            _broadcastChannel->setReportInterval(static_cast<uint32_t>(ms));
+        }
+        return;
+    }
+}
+
+// ── Client management ─────────────────────────────────────────────────────────
+
+ESPNowClient* ESPNowServer::findClient(const uint8_t* mac) const {
+    for (int i = 0; i < kMaxClients; i++) {
+        if (_clients[i] && memcmp(_clients[i]->peerMac(), mac, 6) == 0) {
+            return _clients[i];
+        }
+    }
+    return nullptr;
+}
+
+ESPNowClient* ESPNowServer::createClient(const uint8_t* mac) {
+    for (int i = 0; i < kMaxClients; i++) {
+        if (_clients[i] == nullptr) {
+            _clients[i] = new ESPNowClient(mac, _report_interval_ms, ++_next_id);
+            allChannels.registration(_clients[i]);
+            return _clients[i];
+        }
+    }
+    return nullptr;  // all slots occupied
+}
+
+// ── Radio helpers ─────────────────────────────────────────────────────────────
+
+void ESPNowServer::sendFrame(const uint8_t* mac, const char* msg) {
+    char   frame[128];
+    size_t flen = snprintf(frame, sizeof(frame), "[FluidNC: %s]", msg);
+    esp_now_send(mac, reinterpret_cast<const uint8_t*>(frame), flen);
+}
+
+bool ESPNowServer::initESPNow() {
+    if (esp_now_init() != ESP_OK) {
+        log_error("espnow: esp_now_init failed");
+        return false;
+    }
+    esp_now_register_recv_cb(onReceive);
+    esp_now_register_send_cb(onSend);
+
+    // Pre-register the broadcast peer so the broadcast channel can TX
+    // status reports before any remote has connected.
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, kBroadcastMac, 6);
+    peer.channel = 0;
+    peer.encrypt = false;
+    if (esp_now_add_peer(&peer) != ESP_OK) {
+        log_error("espnow: failed to add broadcast peer");
+        return false;
+    }
+    return true;
+}
+
+// ── init ──────────────────────────────────────────────────────────────────────
+
+void ESPNowServer::init() {
+    _instance = this;
+
+    if (!initESPNow()) {
+        return;
+    }
+
+    _broadcastChannel = new ESPNowBroadcastChannel();
+    _broadcastChannel->setReportInterval(_report_interval_ms);
+    allChannels.registration(_broadcastChannel);
+
+    log_info("espnow: server ready (broadcast status active; waiting for remotes)");
+}
