@@ -9,7 +9,12 @@
 * To enable, you will need to add this to your config.yaml:
 ```
 espnow_channel:
-  report_interval_ms: 75
+  report_interval_ms: 100
+```
+* Also, for Jackpot boards, this has changed from `I2S_STATIC` to `I2S`:
+```
+stepping: 
+  engine: I2S
 ```
 * See FluidDial/README-ESP-NOW.md for details
 
