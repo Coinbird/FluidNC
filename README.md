@@ -10,7 +10,11 @@
 ```
 espnow_channel:
   report_interval_ms: 100
+  broadcast_interval_ms: 200
 ```
+`report_interval_ms` sets the status interval for connected remotes (e.g. FluidDial).
+`broadcast_interval_ms` sets how often (ms) status is broadcast for passive display devices;
+it is optional (default 200), and `0` disables broadcasting.
 * Also, for Jackpot boards, this has changed from `I2S_STATIC` to `I2S`:
 ```
 stepping: 

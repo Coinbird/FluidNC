@@ -46,8 +46,10 @@ class ESPNowClient : public Channel {
     // pushBytes(); drives the disconnect timeout in autoReport().
     std::atomic<uint32_t> _last_rx_ms { 0 };
 
-    // Jog-watchdog rate limiter (main task only — no atomic needed).
+    // Jog-watchdog state (main task only — no atomics needed).
     uint32_t _last_jog_inject_ms = 0;
+    uint32_t _jog_start_ms       = 0;   // when we first entered State::Jog
+    bool     _in_jog              = false;
 
     // Idle-timeout disconnect detection. Doubles as the "already logged" guard.
     std::atomic<bool> _stale { false };

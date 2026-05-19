@@ -17,9 +17,10 @@ class ESPNowBroadcastChannel;
 //
 // Two modes of operation:
 //
-//   Display mode  — any device sends "[FluidNC: $report/interval=N]" (broadcast).
-//                   Server starts broadcasting status reports as "[FluidNC: <Idle|...>]".
-//                   No connection needed; fire-and-forget for any number of displays.
+//   Display mode  — when broadcast_interval_ms is non-zero the server periodically
+//                   broadcasts status as "[FluidNC: <Idle|...>]" regardless of
+//                   machine state.  Fire-and-forget; any number of passive display
+//                   devices can listen, no connection required.
 //
 //   Control mode  — device sends "[FluidNC: Connect]" (broadcast).
 //                   Server creates a unicast ESPNowClient for that MAC, replies
@@ -29,7 +30,8 @@ class ESPNowBroadcastChannel;
 //
 // Configure in YAML (key kept as espnow_channel for backward compatibility):
 //   espnow_channel:
-//     report_interval_ms: 500   # default broadcast interval; overridden by $report/interval=N
+//     report_interval_ms:  500   # status interval for connected remotes
+//     broadcast_interval_ms: 200   # status broadcast interval (ms); optional, default 200, 0 = disabled
 
 class ESPNowServer : public Configuration::Configurable {
     static constexpr int kMaxClients = 4;
@@ -39,8 +41,9 @@ class ESPNowServer : public Configuration::Configurable {
     static void onReceive(const uint8_t* mac, const uint8_t* data, int len);
     static void onSend(const uint8_t* mac, esp_now_send_status_t status);
 
-    int32_t                _report_interval_ms = 500;
-    int                    _next_id            = 0;  // increments with each new client
+    int32_t                _report_interval_ms  = 500;  // for connected remotes
+    int32_t                _broadcast_interval_ms  = 200;  // status broadcast interval (ms); 0 = off
+    int                    _next_id             = 0;     // increments with each new client
     ESPNowBroadcastChannel* _broadcastChannel  = nullptr;
     ESPNowClient*           _clients[kMaxClients] = {};
 
@@ -60,6 +63,7 @@ public:
 
     void group(Configuration::HandlerBase& handler) override {
         handler.item("report_interval_ms", _report_interval_ms);
+        handler.item("broadcast_interval_ms", _broadcast_interval_ms);
     }
 };
 

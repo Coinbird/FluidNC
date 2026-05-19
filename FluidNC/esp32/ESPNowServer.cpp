@@ -8,9 +8,11 @@
 #include "../src/Report.h"   // log_info, log_error, log_warn
 
 #include <esp_now.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>  // xTaskGetTickCount
 #include <cstring>
 #include <cstdio>
-#include <cstdlib>  // atoi
+#include <cstdlib>
 
 static const uint8_t kBroadcastMac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
@@ -58,6 +60,20 @@ public:
             write(buf[i]);
         }
         return len;
+    }
+
+    // Emit a status report on a fixed interval regardless of machine state.
+    // The base Channel::autoReport() only fires periodically while the machine
+    // is moving (Cycle/Homing/Jog); a passive display needs updates even when
+    // the machine is idle, so this override drops the motion-state gate.
+    void autoReport() override {
+        if (_reportInterval == 0) {
+            return;
+        }
+        if ((int32_t(xTaskGetTickCount()) - _nextReportTime) >= 0) {
+            _nextReportTime = xTaskGetTickCount() + _reportInterval;
+            report_realtime_status(*this);
+        }
     }
 
     // Broadcast channel is write-only — no inbound data.
@@ -169,15 +185,8 @@ void ESPNowServer::handleFrame(const uint8_t* mac, const char* cmd) {
         return;
     }
 
-    // ── Display mode ──────────────────────────────────────────────────────────
-    // "[FluidNC: $report/interval=N]" — fire-and-forget from any display device.
-    if (strncmp(cmd, "$report/interval=", 17) == 0) {
-        int32_t ms = static_cast<int32_t>(atoi(cmd + 17));
-        if (ms > 0 && _broadcastChannel) {
-            _broadcastChannel->setReportInterval(static_cast<uint32_t>(ms));
-        }
-        return;
-    }
+    // Display mode is fully config-driven (espnow_channel: broadcast_interval_ms);
+    // display devices are passive listeners and send no control frames.
 }
 
 // ── Client management ─────────────────────────────────────────────────────────
@@ -241,8 +250,12 @@ void ESPNowServer::init() {
     }
 
     _broadcastChannel = new ESPNowBroadcastChannel();
-    _broadcastChannel->setReportInterval(_report_interval_ms);
+    _broadcastChannel->setReportInterval(_broadcast_interval_ms);
     allChannels.registration(_broadcastChannel);
 
-    log_info("espnow: server ready (broadcast status active; waiting for remotes)");
+    if (_broadcast_interval_ms > 0) {
+        log_info("espnow: server ready (broadcasting status every " << _broadcast_interval_ms << " ms)");
+    } else {
+        log_info("espnow: server ready (broadcast disabled; waiting for remotes)");
+    }
 }

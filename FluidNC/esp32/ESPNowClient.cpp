@@ -133,18 +133,27 @@ Error ESPNowClient::pollLine(char* line) {
     // Jog watchdog: while a jog is running, the pendant sends a keepalive
     // every ~250 ms (see MultiJogScene). If that keepalive stops for longer
     // than kJogWatchdogMs the pendant has dropped — inject a JogCancel so a
-    // continuous jog can't run away. Armed ONLY during State::Jog: an idle
-    // pendant is legitimately silent and must not be cancelled.
-    // Lives in pollLine() (called every protocol cycle) rather than
-    // available() (not reliably polled). Uses its own rate-limit timer so it
-    // never disturbs _last_rx_ms, which tracks only real pendant traffic.
+    // jog can't run away. Armed ONLY during State::Jog.
+    //
+    // Guard: only fire if the pendant sent something AFTER this jog started.
+    // Without this, a WebUI jog would be cancelled after 500 ms because
+    // _last_rx_ms predates the jog and the pendant stays silent.
     if (state_is(State::Jog)) {
+        if (!_in_jog) {
+            _in_jog       = true;
+            _jog_start_ms = millis();
+        }
         uint32_t last = _last_rx_ms.load(std::memory_order_relaxed);
         uint32_t now  = millis();
-        if (last != 0 && (now - last) > kJogWatchdogMs && (now - _last_jog_inject_ms) > kJogWatchdogMs) {
+        // last > _jog_start_ms: pendant sent something during this jog
+        if (last != 0 && last > _jog_start_ms &&
+            (now - last) > kJogWatchdogMs &&
+            (now - _last_jog_inject_ms) > kJogWatchdogMs) {
             ringPush(0x85);  // JogCancel
             _last_jog_inject_ms = now;
         }
+    } else {
+        _in_jog = false;
     }
     return Channel::pollLine(line);
 }
