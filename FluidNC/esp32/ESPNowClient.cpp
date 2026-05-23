@@ -1,4 +1,4 @@
-// Copyright (c) 2024 FluidNC contributors
+// Copyright (c) 2026 FluidNC contributors
 // Use of this source code is governed by a GPLv3 license that can be found in the LICENSE file.
 
 #include "ESPNowClient.h"

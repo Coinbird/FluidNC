@@ -1,4 +1,4 @@
-// Copyright (c) 2024 FluidNC contributors
+// Copyright (c) 2026 FluidNC contributors
 // Use of this source code is governed by a GPLv3 license that can be found in the LICENSE file.
 
 #include "ESPNowServer.h"
@@ -113,16 +113,20 @@ void ESPNowServer::onReceive(const uint8_t* mac, const uint8_t* data, int len) {
         return;
     }
 
-    // Raw bytes — GCode from a connected remote.  Route to the matching
-    // unicast client.  Special-case: reply to a bare '?' from an unconnected
-    // device so it can be used as a channel-alive probe without having to
-    // speak the [FluidNC: ...] protocol first.
+    // Raw bytes — GCode from a connected remote, or a bare '?' channel probe.
+    //
+    // A '?' from an ACTIVE client is a normal status request → route to it.
+    // A '?' from an unconnected OR *stale* client is a channel-alive probe →
+    // reply "[FluidNC: ?]". The stale case matters: a remote that dropped (e.g.
+    // walked out of range) still owns its client slot here, so without the
+    // stale check its re-scan probes would be swallowed by pushBytes() and it
+    // could never re-find our channel. Any non-probe bytes still route to the
+    // client (stale or not) — it's clearly alive again.
     ESPNowClient* client = _instance->findClient(mac);
-    if (client) {
+    bool          probe  = (len == 1 && data[0] == '?');
+    if (client && !(probe && client->isStale())) {
         client->pushBytes(data, len);
-    } else if (len == 1 && data[0] == '?') {
-        // Minimal "I'm here" broadcast reply so FluidDial can use '?' as a
-        // channel-alive probe before sending [FluidNC: Connect].
+    } else if (probe) {
         sendFrame(kBroadcastMac, "?");
     }
 }
