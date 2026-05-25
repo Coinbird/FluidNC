@@ -2,8 +2,9 @@
 // Use of this source code is governed by a GPLv3 license that can be found in the LICENSE file.
 
 #include "ESPNowClient.h"
-#include "../src/Report.h"  // log_warn
-#include "../src/State.h"   // state_is(), State::Jog
+#include "../src/Report.h"       // log_warn
+#include "../src/State.h"        // state_is(), State::Jog
+#include "../src/RealtimeCmd.h"  // execute_realtime_command(), Cmd::JogCancel
 
 #include <esp_now.h>
 #include <freertos/FreeRTOS.h>
@@ -132,8 +133,8 @@ int ESPNowClient::available() {
 Error ESPNowClient::pollLine(char* line) {
     // Jog watchdog: while a jog is running, the pendant sends a keepalive
     // every ~250 ms (see MultiJogScene). If that keepalive stops for longer
-    // than kJogWatchdogMs the pendant has dropped — inject a JogCancel so a
-    // jog can't run away. Armed ONLY during State::Jog.
+    // than kJogWatchdogMs the pendant has dropped — cancel the jog so it can't
+    // run away. Armed ONLY during State::Jog.
     //
     // Guard: only fire if the pendant sent something AFTER this jog started.
     // Without this, a WebUI jog would be cancelled after 500 ms because
@@ -149,7 +150,15 @@ Error ESPNowClient::pollLine(char* line) {
         if (last != 0 && last > _jog_start_ms &&
             (now - last) > kJogWatchdogMs &&
             (now - _last_jog_inject_ms) > kJogWatchdogMs) {
-            ringPush(0x85);  // JogCancel
+            // Pendant went silent mid-jog — cancel it. Execute the realtime
+            // command directly: pollLine() runs in the main task, the same
+            // context that normally dispatches realtime commands. Do NOT push
+            // 0x85 into the RX ring — that ring is single-producer (the WiFi-task
+            // recv callback via pushBytes()), so writing it from this task too
+            // would race _rx_head and corrupt the byte stream. execute_realtime_
+            // command() self-gates on State::Jog and posts motionCancelEvent,
+            // exactly as a received 0x85 would.
+            execute_realtime_command(Cmd::JogCancel, *this);
             _last_jog_inject_ms = now;
         }
     } else {
