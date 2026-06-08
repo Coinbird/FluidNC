@@ -4,6 +4,11 @@
 
 **FluidNC** is a CNC firmware optimized for the ESP32 controller. It is the next generation of firmware from the creators of Grbl_ESP32. It includes a web based UI and the flexibility to operate a wide variety of machine types. This includes the ability to control machines with multiple tool types such as laser plus spindle or a tool changer.  
 
+## UPDATE - This fork is NO LONGER UNDER DEVELOPMENT. It functions but I recommend you move forward with the official ESP-NOW support branch: https://github.com/figamore/FluidDial/blob/main/docs%2FESP-NOW.md
+
+
+
+
 ## This fork adds ESP-NOW Support
 
 * To enable, you will need to add this to your config.yaml:
